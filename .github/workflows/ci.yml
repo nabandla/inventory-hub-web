@@ -1,4 +1,4 @@
-name: CI
+name: CI/CD
 
 on:
   push:
@@ -11,9 +11,10 @@ on:
 permissions:
   contents: read
 
+# Never cancel a deploy that is already running; only superseded pull-request runs are cancelled.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
@@ -40,8 +41,7 @@ jobs:
       - name: Test
         run: npm test
 
-      # The build proves the app compiles for production. These are public, non-secret placeholders:
-      # the real values are baked in at deploy time, never stored in the repository.
+      # Proves the app compiles for production. Public placeholder values: the real ones are used below.
       - name: Build
         run: npm run build
         env:
@@ -49,3 +49,88 @@ jobs:
           VITE_TENANT_ID: 00000000-0000-0000-0000-000000000000
           VITE_CLIENT_ID: 00000000-0000-0000-0000-000000000000
           VITE_API_SCOPE: api://00000000-0000-0000-0000-000000000000/access_as_user
+
+  deploy-dev:
+    name: Deploy to dev
+    needs: test
+    # Pull requests only run the tests; they never deploy
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: dev
+      url: https://victorious-pebble-017e9e600.5.azurestaticapps.net
+    env:
+      SITE_URL: https://victorious-pebble-017e9e600.5.azurestaticapps.net
+      # Everything below is public by nature: it is copied into the page every visitor downloads.
+      VITE_API_BASE_URL: https://app-inventory-hub-dev-nb01-bshrg6aueegke9bn.centralindia-01.azurewebsites.net
+      VITE_TENANT_ID: 694f30ad-5203-45f4-ba31-1426ed35695c
+      VITE_CLIENT_ID: 6492300b-ac31-42af-911a-41909a33f45e
+      VITE_API_SCOPE: api://4e7f5012-a1c2-464f-90b6-42e346e8deae/access_as_user
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The real settings are baked into the files here, so the deployed site talks to the dev API
+      - name: Build
+        run: npm run build
+
+      - name: Deploy to Azure Static Web Apps
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN_DEV }}
+          action: upload
+          app_location: dist
+          skip_app_build: true
+          skip_api_build: true
+
+      # A deploy that "succeeded" can still be the wrong site, so look at what is really being served.
+      # Files take a little while to reach the edge, so retry patiently.
+      - name: Check the deployed site
+        run: |
+          for i in $(seq 1 20); do
+            page=$(curl -s --max-time 30 "$SITE_URL/" || true)
+            asset=$(echo "$page" | grep -o '/assets/index-[A-Za-z0-9_-]*\.js' | head -n1 || true)
+            if [ -n "$asset" ] && curl -s --max-time 30 "$SITE_URL$asset" | grep -q "$VITE_CLIENT_ID"; then
+              echo "attempt $i: the page serves a build that contains this site's client ID"
+              break
+            fi
+            echo "attempt $i/20: the new build is not being served yet"
+            if [ "$i" = 20 ]; then echo "::error::the deployed site never served the new build"; exit 1; fi
+            sleep 15
+          done
+
+          echo "--- reloading a deep link must still serve the app (single-page fallback)"
+          deep=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 "$SITE_URL/some/deep/link")
+          echo "GET /some/deep/link -> HTTP $deep"
+          [ "$deep" = "200" ] || { echo "::error::deep links do not fall back to the app"; exit 1; }
+
+          echo "--- security headers"
+          headers=$(curl -s -D - -o /dev/null --max-time 30 "$SITE_URL/")
+          echo "$headers" | grep -qi '^x-content-type-options: *nosniff' || { echo "::error::missing X-Content-Type-Options"; exit 1; }
+          echo "$headers" | grep -qi '^content-security-policy-report-only:' || { echo "::error::missing the CSP header"; exit 1; }
+
+      # The most common deployment mistake: the site is live but the API does not allow its address.
+      - name: Check the API allows this site (CORS preflight)
+        run: |
+          for i in $(seq 1 12); do
+            headers=$(curl -s -i --max-time 60 -X OPTIONS "$VITE_API_BASE_URL/v1/items" \
+              -H "Origin: $SITE_URL" \
+              -H "Access-Control-Request-Method: POST" \
+              -H "Access-Control-Request-Headers: authorization,content-type" || true)
+            code=$(echo "$headers" | head -n1 | awk '{print $2}')
+            echo "preflight attempt $i/12 -> HTTP ${code:-none}"
+            if [ "$code" = "200" ] && echo "$headers" | grep -qi "^access-control-allow-origin: *$SITE_URL"; then exit 0; fi
+            sleep 15
+          done
+          echo "::error::the API does not allow $SITE_URL. Add it to CORS_ORIGINS on the dev web app (no trailing slash)."
+          exit 1
