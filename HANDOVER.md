@@ -39,7 +39,8 @@ React 19 + TypeScript + Vite, `@azure/msal-browser` / `@azure/msal-react`, Vites
 - Typecheck clean, 51 tests pass, production build works, dev server serves the page with the settings.
 - The DEV API's CORS (setting `CORS_ORIGINS=http://localhost:5173`) answers the browser preflight for
   `Authorization` + `Content-Type` and refuses other origins.
-- NOT yet verified: a real interactive sign-in in a browser and a save through the UI (needs the user at the browser).
+- VERIFIED by the user (2026-10-19): real interactive Microsoft sign-in in a browser at http://localhost:5173, the page listed an item created earlier from Postman (`TEST-0001`, id 44 on dev), and an item added through the form was saved. Still worth confirming independently with `GET /v1/items` (the database, not the screen).
+- Dev data note: test items (`TEST-0001` and the one added through the form) are in the DEV database.
 
 ## Decisions
 - Separate repo (different team model); no shared code; contract = API repo `contract/openapi.json`.
@@ -53,7 +54,7 @@ React 19 + TypeScript + Vite, `@azure/msal-browser` / `@azure/msal-react`, Vites
 - The list endpoint has no total count, so the UI cannot show pages yet.
 
 ## Next
-1. User runs `npm run dev`, signs in, creates an item, then confirms it independently (Postman GET or the database).
+1. (done, see Verified) Run, sign in, create an item.
 2. Edit and delete (needs `PUT`/`DELETE`, role Items.Write).
 3. Deploy to Azure Static Web Apps (dev): add its address to the DEV API's `CORS_ORIGINS` and to this app's
    SPA redirect URIs in Entra; the key-in-browser problem does not exist any more (tokens, not keys).
